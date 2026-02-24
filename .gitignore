@@ -1,0 +1,16 @@
+# Environment — contains credentials; copy .env.example and fill in
+.env
+
+# Test videos — may be large binary files
+test_videos/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# macOS
+.DS_Store
+
+# Claude Code
+.claude/

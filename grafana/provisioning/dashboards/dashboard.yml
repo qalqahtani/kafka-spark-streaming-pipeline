@@ -1,0 +1,21 @@
+# =============================================================================
+# Grafana Dashboard Provisioner
+# =============================================================================
+# Points Grafana at the local directory containing our dashboard JSON files.
+# Dashboards are loaded from disk on startup and on reload.
+# =============================================================================
+
+apiVersion: 1
+
+providers:
+  - name: "Streaming Pipeline"
+    orgId: 1
+    folder: "Streaming Pipeline"
+    folderUid: "streaming-pipeline"
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30    # reload dashboards if JSON file changes
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

@@ -1,0 +1,109 @@
+# =============================================================================
+# Prometheus Scrape Configuration — Kafka-Spark Streaming Pipeline
+# =============================================================================
+# Prometheus pulls metrics from each service at the configured interval.
+# All targets are reachable by their Docker Compose service names.
+# =============================================================================
+
+global:
+  # Default scrape interval — how often Prometheus fetches metrics
+  scrape_interval: 15s
+  # Timeout for each individual scrape
+  scrape_timeout: 10s
+  # How often rules are evaluated
+  evaluation_interval: 15s
+  # Labels added to all time series scraped by this Prometheus instance
+  external_labels:
+    pipeline: "streaming-pipeline"
+    environment: "development"
+
+# ---------------------------------------------------------------------------
+# Scrape configurations
+# ---------------------------------------------------------------------------
+scrape_configs:
+
+  # --- Kafka (via kafka-exporter) ---
+  # kafka-exporter connects to the Kafka broker and exposes broker, topic,
+  # and consumer group metrics in Prometheus format on port 9308.
+  - job_name: "kafka"
+    static_configs:
+      - targets: ["kafka-exporter:9308"]
+        labels:
+          service: "kafka"
+    scrape_interval: 15s
+    metrics_path: /metrics
+
+  # --- Python Producer ---
+  # The producer's prometheus_client HTTP server exposes:
+  #   producer_messages_total (by stream_type, topic)
+  #   producer_bytes_simulated_total (by stream_type)
+  #   producer_messages_per_second (by stream_type)
+  #   producer_api_calls_total (by endpoint, status)
+  - job_name: "producer"
+    static_configs:
+      - targets: ["producer:8765"]
+        labels:
+          service: "producer"
+    scrape_interval: 5s    # higher frequency for real-time rate graphs
+    metrics_path: /metrics
+
+  # --- FastAPI ---
+  # FastAPI's prometheus_client ASGI app exposes:
+  #   api_requests_total (by endpoint, method, status)
+  #   api_request_duration_seconds (by endpoint)
+  #   api_kafka_events_published_total (by topic)
+  - job_name: "fastapi"
+    static_configs:
+      - targets: ["api:8000"]
+        labels:
+          service: "api"
+    scrape_interval: 15s
+    metrics_path: /metrics
+
+  # --- Spark Job (driver metrics) ---
+  # The Spark driver runs a prometheus_client server exposing:
+  #   spark_vod_chunks_processed_total
+  #   spark_live_chunks_processed_total
+  #   live_chunk_gaps_total
+  #   chunk_checksum_failures_total (by stream_type)
+  #   chunk_processing_latency_seconds (by stream_type)
+  #   spark_vod_variants_generated_total
+  - job_name: "spark-job"
+    static_configs:
+      - targets: ["spark-job:8766"]
+        labels:
+          service: "spark"
+    scrape_interval: 10s
+    metrics_path: /metrics
+
+  # --- MongoDB (via mongodb-exporter) ---
+  # percona/mongodb_exporter exposes:
+  #   mongodb_op_counters_total (inserts, updates, queries, etc.)
+  #   mongodb_connections (current, available)
+  #   mongodb_memory (resident, virtual)
+  - job_name: "mongodb"
+    static_configs:
+      - targets: ["mongodb-exporter:9216"]
+        labels:
+          service: "mongodb"
+    scrape_interval: 15s
+    metrics_path: /metrics
+
+  # --- MinIO built-in metrics ---
+  # MinIO exposes cluster-level metrics at /minio/v2/metrics/cluster.
+  # Includes: objects stored, storage used, API request rates.
+  # Requires MINIO_PROMETHEUS_AUTH_TYPE=public (set in docker-compose).
+  - job_name: "minio"
+    static_configs:
+      - targets: ["minio:9000"]
+        labels:
+          service: "minio"
+    scrape_interval: 30s
+    metrics_path: /minio/v2/metrics/cluster
+
+  # --- Prometheus self-monitoring ---
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+        labels:
+          service: "prometheus"
