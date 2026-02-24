@@ -1,0 +1,522 @@
+# =============================================================================
+# Kafka-Spark Video Streaming Pipeline — Docker Compose
+# =============================================================================
+# Single command: docker-compose up --build
+#
+# Service map:
+#   kafka            → message broker (KRaft, no ZooKeeper)
+#   kafka-init       → one-shot topic creation
+#   kafka-exporter   → Prometheus metrics for Kafka
+#   redpanda-console → Kafka web UI  (http://localhost:8080)
+#   mongodb          → metadata store
+#   mongo-express    → MongoDB web UI (http://localhost:8081)
+#   minio            → object storage  (http://localhost:9000)
+#   minio-init       → one-shot bucket creation
+#   api              → FastAPI REST layer (http://localhost:8000/docs)
+#   producer         → simulates vod + live ingest
+#   spark-master     → Spark standalone master UI (http://localhost:8090)
+#   spark-worker     → Spark worker node
+#   spark-job        → Spark Structured Streaming job
+#   prometheus       → metrics aggregation (http://localhost:9090)
+#   grafana          → dashboards (http://localhost:3000)
+#   mongodb-exporter → Prometheus metrics for MongoDB
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Named volumes — data survives container restarts
+# ---------------------------------------------------------------------------
+volumes:
+  kafka_data:
+  mongodb_data:
+  minio_data:
+  prometheus_data:
+  grafana_data:
+
+# ---------------------------------------------------------------------------
+# Single overlay network — all containers can reach each other by hostname
+# ---------------------------------------------------------------------------
+networks:
+  pipeline-net:
+    driver: bridge
+
+services:
+
+  # ===========================================================================
+  # KAFKA — Apache Kafka 4.x in KRaft mode (no ZooKeeper required)
+  # Uses the official apache/kafka image from Docker Hub.
+  # KRaft = Kafka Raft Metadata — self-managed metadata via the Raft protocol.
+  # In Kafka 4.0+, ZooKeeper has been completely removed from the codebase.
+  #
+  # Env vars use the KAFKA_* prefix (no KAFKA_CFG_ — that was bitnami-specific).
+  # The official image maps KAFKA_* → server.properties keys automatically.
+  # ===========================================================================
+  kafka:
+    image: apache/kafka:latest
+    container_name: pipeline-kafka
+    hostname: kafka
+    ports:
+      # Internal port 9092 used by services inside Docker (api, producer, spark)
+      # External port 9094 exposed on the host for local debugging tools
+      - "${KAFKA_EXTERNAL_PORT:-9094}:9094"
+    environment:
+      # --- KRaft identity ---
+      # NODE_ID must be unique per broker; 1 is fine for a single-node cluster
+      KAFKA_NODE_ID: "1"
+      # This node acts as both a broker (serves clients) and a controller
+      # (manages cluster metadata via Raft). Fine for a single-node setup.
+      KAFKA_PROCESS_ROLES: "broker,controller"
+
+      # --- Listeners ---
+      # PLAINTEXT  → internal Docker network (producer, api, spark)
+      # CONTROLLER → inter-controller Raft communication (same node here)
+      # EXTERNAL   → host machine port for debugging
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092,EXTERNAL://localhost:${KAFKA_EXTERNAL_PORT:-9094}"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+
+      # --- KRaft quorum ---
+      # Format: nodeId@host:controllerPort
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+
+      # --- Cluster ID ---
+      # Fixed base64-encoded UUID — required for KRaft; must be consistent
+      # across restarts (volume preserves the formatted log dirs after first boot)
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qg"
+
+      # --- Message size ---
+      # Kafka carries ONLY chunk metadata (JSON ≤ 1 KB), never video bytes.
+      # 1 MB limit is generous for metadata but prevents accidental video upload.
+      KAFKA_MESSAGE_MAX_BYTES: "${KAFKA_MESSAGE_MAX_BYTES:-1048576}"
+      KAFKA_REPLICA_FETCH_MAX_BYTES: "${KAFKA_MESSAGE_MAX_BYTES:-1048576}"
+
+      # --- Log retention ---
+      KAFKA_LOG_RETENTION_HOURS: "24"
+      KAFKA_LOG_SEGMENT_BYTES: "1073741824"
+
+      # Allow topics to be created on first produce (kafka-init also creates them explicitly)
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+      # --- Data directory (mapped to named volume) ---
+      KAFKA_LOG_DIRS: "/var/lib/kafka/data"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - pipeline-net
+
+  # ---------------------------------------------------------------------------
+  # KAFKA INIT — creates the two required topics explicitly with correct
+  # partition counts. Runs once then exits.
+  # vod-chunks: 3 partitions (lower throughput VOD)
+  # live-chunks: 6 partitions (higher throughput live)
+  # ---------------------------------------------------------------------------
+  kafka-init:
+    image: apache/kafka:latest
+    container_name: pipeline-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        echo '[kafka-init] Creating topics...'
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+          --create --if-not-exists \
+          --topic ${VOD_TOPIC:-vod-chunks} \
+          --partitions 3 \
+          --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+          --create --if-not-exists \
+          --topic ${LIVE_TOPIC:-live-chunks} \
+          --partitions 6 \
+          --replication-factor 1
+        echo '[kafka-init] Topics created successfully'
+    networks:
+      - pipeline-net
+    restart: on-failure
+
+  # ---------------------------------------------------------------------------
+  # KAFKA EXPORTER — exposes Kafka broker metrics in Prometheus format
+  # Scraped by Prometheus on port 9308
+  # ---------------------------------------------------------------------------
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:latest
+    container_name: pipeline-kafka-exporter
+    command:
+      - "--kafka.server=kafka:9092"
+      - "--log.level=info"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - pipeline-net
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # REDPANDA CONSOLE — Kafka web UI for real-time topic/message inspection
+  # Access at http://localhost:8080
+  # ---------------------------------------------------------------------------
+  redpanda-console:
+    image: redpandadata/console:latest
+    container_name: pipeline-redpanda-console
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_BROKERS: "kafka:9092"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - pipeline-net
+    restart: unless-stopped
+
+  # ===========================================================================
+  # MONGODB — stores stream and chunk metadata
+  # Single node, no auth (portfolio project)
+  # Collections: vod_metadata, live_metadata (in db: pipeline)
+  # ===========================================================================
+  mongodb:
+    image: mongo:7.0
+    container_name: pipeline-mongodb
+    hostname: mongodb
+    ports:
+      - "${MONGO_PORT:-27017}:27017"
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - pipeline-net
+
+  # ---------------------------------------------------------------------------
+  # MONGO EXPRESS — MongoDB web UI
+  # Access at http://localhost:8081
+  # ---------------------------------------------------------------------------
+  mongo-express:
+    image: mongo-express:1.0.2
+    container_name: pipeline-mongo-express
+    ports:
+      - "8081:8081"
+    environment:
+      ME_CONFIG_MONGODB_URL: "mongodb://mongodb:27017/"
+      ME_CONFIG_BASICAUTH: "false"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - pipeline-net
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # MONGODB EXPORTER — exposes MongoDB metrics in Prometheus format
+  # Scraped by Prometheus on port 9216
+  # ---------------------------------------------------------------------------
+  mongodb-exporter:
+    image: percona/mongodb_exporter:0.40
+    container_name: pipeline-mongodb-exporter
+    command:
+      - "--mongodb.uri=mongodb://mongodb:27017"
+      - "--collect-all"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - pipeline-net
+    restart: unless-stopped
+
+  # ===========================================================================
+  # MINIO — S3-compatible object storage for video chunks and manifests
+  # Console: http://localhost:9001  (minioadmin / minioadmin123)
+  # API:     http://localhost:9000
+  # ===========================================================================
+  minio:
+    image: minio/minio:latest
+    container_name: pipeline-minio
+    hostname: minio
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:-minioadmin}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-minioadmin123}"
+      # Enable Prometheus metrics scraping on /minio/v2/metrics/cluster
+      MINIO_PROMETHEUS_AUTH_TYPE: "public"
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - pipeline-net
+
+  # ---------------------------------------------------------------------------
+  # MINIO INIT — creates the four required buckets on first startup
+  # ---------------------------------------------------------------------------
+  minio-init:
+    image: minio/mc:latest
+    container_name: pipeline-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:-minioadmin}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-minioadmin123}"
+    entrypoint: >
+      /bin/sh -c "
+        echo '[minio-init] Waiting for MinIO...' &&
+        sleep 3 &&
+        mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} &&
+        mc mb --ignore-existing local/${MINIO_BUCKET_VOD_RAW:-vod-raw} &&
+        mc mb --ignore-existing local/${MINIO_BUCKET_VOD_VARIANTS:-vod-variants} &&
+        mc mb --ignore-existing local/${MINIO_BUCKET_LIVE:-live-streams} &&
+        mc mb --ignore-existing local/${MINIO_BUCKET_MANIFESTS:-manifests} &&
+        echo '[minio-init] All buckets created'
+      "
+    networks:
+      - pipeline-net
+    restart: on-failure
+
+  # ===========================================================================
+  # FASTAPI — REST API for VOD uploads and live stream lifecycle only
+  # ===========================================================================
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: pipeline-api
+    hostname: api
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      KAFKA_BROKER: "kafka:9092"
+      VOD_TOPIC: "${VOD_TOPIC:-vod-chunks}"
+      MONGO_URI: "mongodb://mongodb:27017"
+      MONGO_DB: "${MONGO_DB:-pipeline}"
+      MINIO_ENDPOINT: "http://minio:9000"
+      # Public endpoint used for presigned URL generation — must be reachable
+      # from the client's browser / VLC / ffplay (outside Docker).
+      MINIO_PUBLIC_ENDPOINT: "http://localhost:9000"
+      MINIO_ACCESS_KEY: "${MINIO_ROOT_USER:-minioadmin}"
+      MINIO_SECRET_KEY: "${MINIO_ROOT_PASSWORD:-minioadmin123}"
+      MINIO_BUCKET_VOD_RAW: "${MINIO_BUCKET_VOD_RAW:-vod-raw}"
+      MINIO_BUCKET_MANIFESTS: "${MINIO_BUCKET_MANIFESTS:-manifests}"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - pipeline-net
+    restart: unless-stopped
+
+  # ===========================================================================
+  # PRODUCER — simulates two simultaneous ingest sources
+  # Thread 1 (vod):  calls FastAPI every 10-20s
+  # Thread 2 (live): pushes to Kafka every 0.5-1s directly
+  # Exposes /metrics (Prometheus) on port 8765
+  # ===========================================================================
+  producer:
+    build:
+      context: ./producer
+      dockerfile: Dockerfile
+    container_name: pipeline-producer
+    hostname: producer
+    ports:
+      - "8765:8765"
+    environment:
+      KAFKA_BROKER: "kafka:9092"
+      VOD_TOPIC: "${VOD_TOPIC:-vod-chunks}"
+      LIVE_TOPIC: "${LIVE_TOPIC:-live-chunks}"
+      API_URL: "http://api:8000"
+      VOD_INTERVAL_MIN: "${VOD_INTERVAL_MIN:-10}"
+      VOD_INTERVAL_MAX: "${VOD_INTERVAL_MAX:-20}"
+      LIVE_INTERVAL_MIN: "${LIVE_INTERVAL_MIN:-0.5}"
+      LIVE_INTERVAL_MAX: "${LIVE_INTERVAL_MAX:-1.0}"
+      VOD_MIN_SIZE_BYTES: "${VOD_MIN_SIZE_BYTES:-5000000}"
+      VOD_MAX_SIZE_BYTES: "${VOD_MAX_SIZE_BYTES:-20000000}"
+      LIVE_MIN_SIZE_BYTES: "${LIVE_MIN_SIZE_BYTES:-500000}"
+      LIVE_MAX_SIZE_BYTES: "${LIVE_MAX_SIZE_BYTES:-2000000}"
+      MATCH_HOME_TEAM: "${MATCH_HOME_TEAM:-Al-Hilal}"
+      MATCH_AWAY_TEAM: "${MATCH_AWAY_TEAM:-Al-Nassr}"
+      MATCH_COMPETITION: "${MATCH_COMPETITION:-Saudi Pro League}"
+      VOD_SHOW_NAME: "${VOD_SHOW_NAME:-My Streaming Show}"
+      METRICS_PORT: "8765"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    networks:
+      - pipeline-net
+    restart: unless-stopped
+
+  # ===========================================================================
+  # SPARK MASTER — Spark standalone cluster master node
+  # Web UI: http://localhost:8090
+  # Built from spark_job/Dockerfile (apache/spark:latest base with Kafka JARs)
+  # The same image is reused for spark-worker and spark-job.
+  # ===========================================================================
+  spark-master:
+    build:
+      context: ./spark_job
+      dockerfile: Dockerfile
+    container_name: pipeline-spark-master
+    hostname: spark-master
+    ports:
+      - "${SPARK_MASTER_UI_PORT:-8090}:8080"   # Spark master web UI
+      - "${SPARK_MASTER_PORT:-7077}:7077"       # Spark cluster port
+    command:
+      - "/opt/spark/bin/spark-class"
+      - "org.apache.spark.deploy.master.Master"
+      - "-h"
+      - "0.0.0.0"
+    networks:
+      - pipeline-net
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # SPARK WORKER — executes Spark tasks assigned by the master
+  # build: is specified here too so Docker doesn't try to pull the image from
+  # the registry. BuildKit's layer cache makes this build instant (no re-download).
+  # ---------------------------------------------------------------------------
+  spark-worker:
+    build:
+      context: ./spark_job
+      dockerfile: Dockerfile
+    container_name: pipeline-spark-worker
+    hostname: spark-worker
+    environment:
+      SPARK_WORKER_MEMORY: "${SPARK_WORKER_MEMORY:-2g}"
+      SPARK_WORKER_CORES: "${SPARK_WORKER_CORES:-2}"
+    command:
+      - "/opt/spark/bin/spark-class"
+      - "org.apache.spark.deploy.worker.Worker"
+      - "-m"
+      - "${SPARK_WORKER_MEMORY:-2g}"
+      - "-c"
+      - "${SPARK_WORKER_CORES:-2}"
+      - "spark://spark-master:7077"
+    depends_on:
+      - spark-master
+    networks:
+      - pipeline-net
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # SPARK JOB — submits the PySpark Structured Streaming job
+  # build: is specified here too (same reason as spark-worker above).
+  # ---------------------------------------------------------------------------
+  spark-job:
+    build:
+      context: ./spark_job
+      dockerfile: Dockerfile
+    container_name: pipeline-spark-job
+    hostname: spark-job
+    ports:
+      - "4040:4040"    # Spark driver application UI
+      - "8766:8766"    # Prometheus metrics from the Spark driver
+    environment:
+      KAFKA_BROKER: "kafka:9092"
+      VOD_TOPIC: "${VOD_TOPIC:-vod-chunks}"
+      LIVE_TOPIC: "${LIVE_TOPIC:-live-chunks}"
+      MONGO_URI: "mongodb://mongodb:27017"
+      MONGO_DB: "${MONGO_DB:-pipeline}"
+      MINIO_ENDPOINT: "http://minio:9000"
+      MINIO_ACCESS_KEY: "${MINIO_ROOT_USER:-minioadmin}"
+      MINIO_SECRET_KEY: "${MINIO_ROOT_PASSWORD:-minioadmin123}"
+      MINIO_BUCKET_VOD_RAW: "${MINIO_BUCKET_VOD_RAW:-vod-raw}"
+      MINIO_BUCKET_VOD_VARIANTS: "${MINIO_BUCKET_VOD_VARIANTS:-vod-variants}"
+      MINIO_BUCKET_LIVE: "${MINIO_BUCKET_LIVE:-live-streams}"
+      MINIO_BUCKET_MANIFESTS: "${MINIO_BUCKET_MANIFESTS:-manifests}"
+      DVR_WINDOW_SIZE: "${DVR_WINDOW_SIZE:-10}"
+      SPARK_JOB_METRICS_PORT: "8766"
+    command:
+      - "/opt/spark/bin/spark-submit"
+      - "--master"
+      - "spark://spark-master:7077"
+      - "--deploy-mode"
+      - "client"
+      - "--conf"
+      - "spark.ui.port=4040"
+      - "--conf"
+      - "spark.driver.host=spark-job"
+      - "--conf"
+      - "spark.driver.bindAddress=0.0.0.0"
+      - "/opt/spark_streaming.py"
+    depends_on:
+      - spark-master
+      - spark-worker
+      - kafka-init
+      - mongodb
+      - minio-init
+    networks:
+      - pipeline-net
+    restart: on-failure
+
+  # ===========================================================================
+  # PROMETHEUS — scrapes metrics from all services
+  # Access at http://localhost:9090
+  # ===========================================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: pipeline-prometheus
+    hostname: prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.enable-lifecycle"
+    networks:
+      - pipeline-net
+    restart: unless-stopped
+
+  # ===========================================================================
+  # GRAFANA — dashboards for pipeline monitoring
+  # Access at http://localhost:3000 (admin / admin)
+  # ===========================================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: pipeline-grafana
+    hostname: grafana
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD:-admin}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    networks:
+      - pipeline-net
+    restart: unless-stopped

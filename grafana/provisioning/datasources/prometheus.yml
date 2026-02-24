@@ -1,0 +1,24 @@
+# =============================================================================
+# Grafana Datasource Provisioning — Prometheus
+# =============================================================================
+# This file is auto-loaded by Grafana at startup via the provisioning
+# directory mount in docker-compose.yml.
+# Grafana will create this datasource automatically — no manual config needed.
+# =============================================================================
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    # Grafana reaches Prometheus via Docker's internal network
+    url: http://prometheus:9090
+    isDefault: true
+    version: 1
+    editable: true
+    jsonData:
+      # Match the scrape interval in prometheus.yml for correct rate calculations
+      timeInterval: "15s"
+      queryTimeout: "30s"
+      httpMethod: "POST"
