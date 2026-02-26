@@ -25,6 +25,7 @@ This project was built as a portfolio piece covering two fundamentally different
 15. [Project Structure](#15-project-structure)
 16. [Production Considerations](#16-production-considerations)
 17. [Read Path & CDN Integration](#17-read-path--cdn-integration)
+18. [Understanding the Codebase](#18-understanding-the-codebase)
 
 ---
 
@@ -1080,3 +1081,156 @@ In a DRM-protected deployment, the flow is extended:
 The signed CDN URL serves the same conceptual role as the presigned MinIO URL in this simulation — both are time-limited tokens granting access to a specific object path. The difference is scale: a CDN signed URL is valid for millions of edge-cached fetches; a MinIO presigned URL hits a single origin every time.
 
 `stream_id` remains the content key at every step: the platform entitlement check, the CDN URL path, the DRM licence server lookup, and the player's HLS request.
+
+---
+
+## 18. Guide: How to Read and Understand This Codebase
+
+This section is a structured guide for anyone — including the original author returning after a break — who wants to build a real mental model of how the pipeline works, not just what it does. It assumes you have the stack running (`./run.sh start`) and walks you through the code in the order that builds understanding fastest.
+
+**What you'll have at the end:** You'll be able to answer "where does X happen?" for any behaviour you observe in the UIs, explain why each architectural decision was made, and make changes to the code with confidence.
+
+**Time required:** 3–4 focused hours.
+
+---
+
+### The Core Principle
+
+Don't read code like a book from top to bottom. Read it by **following one piece of data through the system**. A single live chunk event touches 5 files. Trace it all the way through and you'll understand the entire pipeline.
+
+---
+
+### Step 1 — Read `.env` first
+
+Before touching any code, read the config file. Every variable in there is a knob the system responds to. When you later see `os.getenv("VOD_TOPIC")` in code, you'll already know what it means.
+
+Pay attention to: topic names, bucket names, interval timings, port numbers. These are the vocabulary of the whole project.
+
+---
+
+### Step 2 — Read `docker-compose.yml` as an architecture diagram
+
+Don't read it as config syntax. Read it as answers to these questions per service:
+
+- What image does this run?
+- What ports does it expose?
+- What environment variables does it receive?
+- Which other services does it depend on?
+
+After this, you should be able to draw the network on paper: which containers can talk to which, and on what port.
+
+---
+
+### Step 3 — Read `producer/producer.py` while watching it run
+
+This is the entry point of all data. Start the logs in one terminal:
+
+```bash
+./run.sh logs producer
+```
+
+Then open the file and read it alongside the logs. It has two threads — find where each thread starts (`vod_producer_thread`, `live_producer_thread`) and read them separately. Focus on:
+
+- What JSON payload does the VOD thread send to FastAPI?
+- What JSON payload does the live thread publish directly to Kafka?
+- Where are the Prometheus counters incremented?
+
+Open **Redpanda Console** at `localhost:8080` → Topics → `live-chunks` → click a message. That JSON is exactly what `live_producer_thread` builds. Find the line in the code that constructs it.
+
+---
+
+### Step 4 — Read `api/main.py` while watching FastAPI handle a request
+
+Open `localhost:8000/docs` in your browser. Find the `POST /vod/upload` endpoint and submit a request manually from the Swagger UI.
+
+Now find that endpoint in the code and trace exactly what it does:
+
+1. Generates a `stream_id`
+2. Writes a placeholder to MinIO
+3. Inserts a document into MongoDB
+4. Publishes a JSON event to Kafka
+5. Returns the `stream_id`
+
+Then open **Mongo Express** at `localhost:8081` → database `pipeline` → `vod_metadata`. Your document is there with `status: uploaded` — that's step 3 you just read.
+
+The question to ask yourself after reading this file: **why does the live path skip all of this?** The answer is in [Section 5](#5-why-live-chunks-bypass-fastapi).
+
+---
+
+### Step 5 — Read `spark_job/spark_streaming.py` in three passes
+
+This is the most complex file. Don't read it once — read it three times with different goals.
+
+**First pass — read only the metric definitions (lines ~74–104)**
+
+These ~8 lines define everything that shows up in Grafana. After this pass you'll understand where every dashboard chart originates.
+
+**Second pass — read `process_vod_chunk()` only**
+
+This function receives one dict (the Kafka message you read in Step 3), then:
+
+1. Verifies the checksum
+2. Simulates a transcode with `time.sleep()`
+3. Writes raw + variant placeholders to MinIO
+4. Builds an HLS manifest string and writes it to MinIO
+5. Upserts the MongoDB document through all status transitions
+
+While reading this, have **MinIO Console** open at `localhost:9001` and watch a new VOD folder appear.
+
+**Third pass — read `process_live_chunk()` only**
+
+Similar to VOD but adds two things that don't exist in VOD:
+
+- **Gap detection** — compares `sequence_number` to `_live_last_seq`. Find where `live_chunk_gaps` is incremented.
+- **DVR window management** — find where `DVR_WINDOW_SIZE` is used. The manifest keeps only the last N entries and updates `#EXT-X-MEDIA-SEQUENCE` so the player knows where the window starts.
+
+After both passes, find the bottom of the file where the Spark session is created and the two streaming queries are started. This is the `main` that wires everything together.
+
+---
+
+### Step 6 — Run `test_video.sh` and trace the journey yourself
+
+```bash
+./test_video.sh test_videos/your_file.mp4 --watch
+```
+
+Take the `stream_id` it prints and manually find it in every system:
+
+| Where | What to look for |
+|---|---|
+| Redpanda Console | Filter messages by your `stream_id` in `vod-chunks` |
+| Spark logs | `./run.sh logs spark-job` — find your `stream_id` being processed |
+| Mongo Express | Filter `{"stream_id": "vod-xxxx"}` — watch `status` change in real time |
+| MinIO Console | Find the folder `vod-xxxx/` in each bucket |
+| Grafana | Watch the VOD latency panel spike when Spark processes your upload |
+
+This is the most valuable exercise. You're not reading — you're **observing the code run**.
+
+---
+
+### Reading Order Summary
+
+```
+1. .env                        → vocabulary of the whole project
+2. docker-compose.yml          → architecture and service wiring
+3. producer/producer.py        → what data enters the system and in what shape
+4. api/main.py                 → VOD write path (3 writes per upload)
+5. spark_streaming.py — pass 1 → where Grafana metrics come from
+   spark_streaming.py — pass 2 → VOD processing (follow one event end-to-end)
+   spark_streaming.py — pass 3 → live processing (gaps + DVR window)
+6. test_video.sh (live run)    → observe everything you just read, in motion
+```
+
+The whole thing takes 3–4 focused hours. The most important thing: **run the system while reading** — don't read the code dry.
+
+---
+
+### Three Concepts Worth Looking Up
+
+If any part of the code is unclear, the answer almost always comes from understanding one of these:
+
+**Kafka fundamentals** — understand producer, consumer, topic, partition, offset, and consumer group. Once you understand offsets, the consumer lag metric in Grafana becomes completely obvious. The Kafka documentation's [Introduction](https://kafka.apache.org/documentation/#gettingStarted) covers this in one page.
+
+**HLS (HTTP Live Streaming)** — understand what an `.m3u8` file is and why it references `.ts` segment files. Open one of the manifests in MinIO Console (`manifests/` bucket → any `.m3u8` → Preview) and read it. Once you understand the format, the entire manifest-building code in `spark_streaming.py` is trivial to follow.
+
+**Spark `foreachBatch`** — Spark Structured Streaming normally processes data using distributed DataFrame operations. `foreachBatch` breaks out of that model and gives you each micro-batch as a plain Python function. This is why the code can use `boto3` and `pymongo` directly without needing Spark connectors. The official [foreachBatch documentation](https://spark.apache.org/docs/latest/structured-streaming-programming-guide.html#foreachbatch) explains this in one page.
