@@ -11,7 +11,7 @@ providers:
   - name: "Streaming Pipeline"
     orgId: 1
     folder: "Streaming Pipeline"
-    folderUid: "streaming-pipeline"
+    folderUid: "pipeline-folder"
     type: file
     disableDeletion: false
     updateIntervalSeconds: 30    # reload dashboards if JSON file changes

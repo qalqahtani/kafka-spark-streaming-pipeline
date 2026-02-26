@@ -1,11 +1,11 @@
 {
   "__inputs": [],
   "__requires": [
-    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "9.0.0" },
+    { "type": "grafana",    "id": "grafana",    "name": "Grafana",    "version": "9.0.0" },
     { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" },
-    { "type": "panel", "id": "timeseries", "name": "Time series", "version": "" },
-    { "type": "panel", "id": "stat", "name": "Stat", "version": "" },
-    { "type": "panel", "id": "gauge", "name": "Gauge", "version": "" }
+    { "type": "panel",      "id": "timeseries", "name": "Time series","version": "" },
+    { "type": "panel",      "id": "stat",       "name": "Stat",       "version": "" },
+    { "type": "panel",      "id": "gauge",      "name": "Gauge",      "version": "" }
   ],
   "annotations": { "list": [] },
   "description": "Kafka-Spark Video Streaming Pipeline — end-to-end metrics",
@@ -19,135 +19,338 @@
     {
       "collapsed": false,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 200,
+      "title": "Pipeline Health — glance view (green = good, orange = warn, red = problem)",
+      "type": "row"
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Messages Spark is behind the producer. Should be 0–2. Orange >5, Red >20 means Spark can't keep up.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "noValue": "0",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green",  "value": null },
+            { "color": "orange", "value": 5 },
+            { "color": "red",    "value": 20 }
+          ]}
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "id": 201,
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "value_and_name" },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "max(kafka_consumergroup_lag{topic=~\"vod-chunks|live-chunks\"}) or vector(0)",
+        "legendFormat": "Consumer Lag",
+        "refId": "A"
+      }],
+      "title": "Kafka Consumer Lag",
+      "type": "stat"
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "99th-percentile time Spark takes to process one live chunk. Green <500ms, Orange <1s, Red >1s.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "noValue": "—",
+          "unit": "ms",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green",  "value": null },
+            { "color": "orange", "value": 500 },
+            { "color": "red",    "value": 1000 }
+          ]}
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "id": 202,
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "value_and_name" },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "histogram_quantile(0.99, rate(chunk_processing_latency_seconds_bucket{stream_type=\"live\"}[1m])) * 1000",
+        "legendFormat": "Live p99",
+        "refId": "A"
+      }],
+      "title": "Live Latency p99",
+      "type": "stat"
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "95th-percentile end-to-end VOD processing time. 5-15s is normal (includes 2-4s simulated transcode). Red >30s.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "noValue": "—",
+          "unit": "ms",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green",  "value": null },
+            { "color": "orange", "value": 15000 },
+            { "color": "red",    "value": 30000 }
+          ]}
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "id": 203,
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "value_and_name" },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "histogram_quantile(0.95, rate(chunk_processing_latency_seconds_bucket{stream_type=\"vod\"}[5m])) * 1000",
+        "legendFormat": "VOD p95",
+        "refId": "A"
+      }],
+      "title": "VOD Latency p95",
+      "type": "stat"
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Checksum failures per second across all streams. ~0.02/s is normal (2% simulated). Orange >0.04/s, Red >0.08/s.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "decimals": 3,
+          "noValue": "0",
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green",  "value": null },
+            { "color": "orange", "value": 0.04 },
+            { "color": "red",    "value": 0.08 }
+          ]}
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "id": 204,
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "value_and_name" },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "sum(rate(chunk_checksum_failures_total[5m]))",
+        "legendFormat": "failures/s",
+        "refId": "A"
+      }],
+      "title": "Checksum Failures/s",
+      "type": "stat"
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Live streams Spark is currently tracking. Should be 1 in this simulation.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "noValue": "0",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "blue", "value": null }
+          ]}
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "id": 205,
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "value_and_name" },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "spark_active_live_streams",
+        "legendFormat": "Active",
+        "refId": "A"
+      }],
+      "title": "Active Live Streams",
+      "type": "stat"
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "How many Prometheus scrape targets are responding. Green = all 6 up (kafka, producer, api, spark, mongodb, minio). Red = multiple down.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "noValue": "0",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red",    "value": null },
+            { "color": "orange", "value": 5 },
+            { "color": "green",  "value": 6 }
+          ]}
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "id": 206,
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "value_and_name" },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "sum(up)",
+        "legendFormat": "Services Up",
+        "refId": "A"
+      }],
+      "title": "Services Healthy",
+      "type": "stat"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 },
       "id": 100,
       "title": "Kafka",
       "type": "row"
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Rate of new messages being written per topic. Live should be ~1/s, VOD ~0.05/s.",
       "fieldConfig": {
-        "defaults": { "unit": "short", "color": { "mode": "palette-classic" } },
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "palette-classic" }
+        },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 7 },
       "id": 1,
       "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
-      "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "rate(kafka_topic_partition_current_offset{topic=~\"vod-chunks|live-chunks\"}[1m])",
-          "legendFormat": "{{topic}} messages/s",
-          "refId": "A"
-        }
-      ],
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "rate(kafka_topic_partition_current_offset{topic=~\"vod-chunks|live-chunks\"}[1m])",
+        "legendFormat": "{{topic}} messages/s",
+        "refId": "A"
+      }],
       "title": "Kafka: Messages per Second per Topic",
       "type": "timeseries"
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "How many messages Spark is behind. Should stay at 0. A growing lag means Spark is slower than the producer — look at the Live Latency p99 panel to investigate.",
       "fieldConfig": {
-        "defaults": { "unit": "short", "color": { "mode": "palette-classic" } },
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "palette-classic" },
+          "custom": { "thresholdsStyle": { "mode": "line" } },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "transparent", "value": null },
+            { "color": "orange", "value": 5 },
+            { "color": "red",    "value": 20 }
+          ]}
+        },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 7 },
       "id": 2,
-      "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "kafka_consumergroup_lag",
-          "legendFormat": "{{consumergroup}} lag on {{topic}}",
-          "refId": "A"
-        }
-      ],
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "kafka_consumergroup_lag",
+        "legendFormat": "{{consumergroup}} on {{topic}}",
+        "refId": "A"
+      }],
       "title": "Kafka: Consumer Group Lag",
       "type": "timeseries"
     },
 
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 },
       "id": 101,
       "title": "Producer",
       "type": "row"
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Messages per second produced, split by stream type. Live ~1/s, VOD ~0.05/s.",
       "fieldConfig": {
         "defaults": { "unit": "short", "color": { "mode": "palette-classic" } },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 17 },
       "id": 3,
-      "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "rate(producer_messages_total[1m])",
-          "legendFormat": "{{stream_type}} messages/s",
-          "refId": "A"
-        }
-      ],
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "rate(producer_messages_total[1m])",
+        "legendFormat": "{{stream_type}} messages/s",
+        "refId": "A"
+      }],
       "title": "Producer: Messages/sec by Stream Type",
       "type": "timeseries"
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Simulated bytes/s per stream type. Live ~1.25 MB/s (avg 1.25 MB × 1/s), VOD ~0.75 MB/s (avg 12.5 MB × 0.06/s).",
       "fieldConfig": {
         "defaults": { "unit": "Bps", "color": { "mode": "palette-classic" } },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 17 },
       "id": 4,
-      "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "rate(producer_bytes_simulated_total[1m])",
-          "legendFormat": "{{stream_type}} bytes/s",
-          "refId": "A"
-        }
-      ],
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "rate(producer_bytes_simulated_total[1m])",
+        "legendFormat": "{{stream_type}} bytes/s",
+        "refId": "A"
+      }],
       "title": "Producer: Simulated Throughput (bytes/sec)",
       "type": "timeseries"
     },
 
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 },
       "id": 102,
       "title": "Live Stream",
       "type": "row"
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Intentional gaps are injected (1 per 1,000-chunk stream). Seeing 1 here is expected. A large value indicates the encoder is dropping segments.",
       "fieldConfig": {
-        "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [
-          { "color": "green", "value": null },
-          { "color": "orange", "value": 1 },
-          { "color": "red", "value": 5 }
-        ]}, "color": { "mode": "thresholds" } },
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green",  "value": null },
+            { "color": "orange", "value": 1 },
+            { "color": "red",    "value": 5 }
+          ]},
+          "color": { "mode": "thresholds" }
+        },
         "overrides": []
       },
-      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 19 },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 27 },
       "id": 5,
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "background" },
-      "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "live_chunk_gaps_total",
-          "legendFormat": "Total Gaps Detected",
-          "refId": "A"
-        }
-      ],
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "live_chunk_gaps_total",
+        "legendFormat": "Total Gaps",
+        "refId": "A"
+      }],
       "title": "Live: Chunk Gaps Detected (Total)",
       "type": "stat"
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "End-to-end time for Spark to process a live chunk. The orange line is 500ms, red is 1s. Both p50 and p99 should stay well below the orange line.",
       "fieldConfig": {
-        "defaults": { "unit": "ms", "color": { "mode": "palette-classic" } },
+        "defaults": {
+          "unit": "ms",
+          "color": { "mode": "palette-classic" },
+          "custom": { "thresholdsStyle": { "mode": "line" } },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "transparent", "value": null },
+            { "color": "orange", "value": 500 },
+            { "color": "red",    "value": 1000 }
+          ]}
+        },
         "overrides": []
       },
-      "gridPos": { "h": 6, "w": 18, "x": 6, "y": 19 },
+      "gridPos": { "h": 6, "w": 18, "x": 6, "y": 27 },
       "id": 6,
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -162,44 +365,55 @@
           "refId": "B"
         }
       ],
-      "title": "Live: Chunk Processing Latency",
+      "title": "Live: Chunk Processing Latency  [orange=500ms  red=1s]",
       "type": "timeseries"
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "How many live chunks Spark processes per second. Should track the producer rate (~1/s).",
       "fieldConfig": {
         "defaults": { "unit": "short", "color": { "mode": "palette-classic" } },
         "overrides": []
       },
-      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 25 },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 34 },
       "id": 7,
-      "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "rate(spark_live_chunks_processed_total[1m])",
-          "legendFormat": "Live chunks/s processed",
-          "refId": "A"
-        }
-      ],
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "rate(spark_live_chunks_processed_total[1m])",
+        "legendFormat": "Live chunks/s processed",
+        "refId": "A"
+      }],
       "title": "Live: Spark Processing Rate",
       "type": "timeseries"
     },
 
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 },
       "id": 103,
       "title": "VOD Stream",
       "type": "row"
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Time from upload to ready. Includes Kafka queuing (~5s) plus 2–4s simulated transcode. Orange line = 15s, red = 30s. A healthy run stays green.",
       "fieldConfig": {
-        "defaults": { "unit": "ms", "color": { "mode": "palette-classic" } },
+        "defaults": {
+          "unit": "ms",
+          "color": { "mode": "palette-classic" },
+          "custom": { "thresholdsStyle": { "mode": "line" } },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "transparent", "value": null },
+            { "color": "orange", "value": 15000 },
+            { "color": "red",    "value": 30000 }
+          ]}
+        },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 42 },
       "id": 8,
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -214,17 +428,19 @@
           "refId": "B"
         }
       ],
-      "title": "VOD: Processing Latency (incl. transcode simulation)",
+      "title": "VOD: Processing Latency  [orange=15s  red=30s]",
       "type": "timeseries"
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "VOD chunks processed per second and quality variants generated. For every 1 chunk processed, 4 variants should be generated. If variants/s ≠ 4× chunks/s, something is wrong.",
       "fieldConfig": {
         "defaults": { "unit": "short", "color": { "mode": "palette-classic" } },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 42 },
       "id": 9,
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -245,69 +461,83 @@
 
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 40 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 51 },
       "id": 104,
       "title": "Data Quality",
       "type": "row"
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Total checksum failures since startup. ~2% failure rate is simulated on purpose. In production, any failure beyond noise would be investigated.",
       "fieldConfig": {
-        "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [
-          { "color": "green", "value": null },
-          { "color": "red", "value": 1 }
-        ]}, "color": { "mode": "thresholds" } },
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "red",   "value": 1 }
+          ]},
+          "color": { "mode": "thresholds" }
+        },
         "overrides": []
       },
-      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 41 },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 52 },
       "id": 10,
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
-      "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "chunk_checksum_failures_total",
-          "legendFormat": "{{stream_type}} failures",
-          "refId": "A"
-        }
-      ],
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "chunk_checksum_failures_total",
+        "legendFormat": "{{stream_type}} failures",
+        "refId": "A"
+      }],
       "title": "Checksum Failures (Total)",
       "type": "stat"
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Rate of checksum failures over time. The orange line is 0.04/s (~4%) and red is 0.08/s (~8%). Expect ~0.02/s from the 2% simulation.",
       "fieldConfig": {
-        "defaults": { "unit": "short", "color": { "mode": "palette-classic" } },
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "palette-classic" },
+          "custom": { "thresholdsStyle": { "mode": "line" } },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "transparent", "value": null },
+            { "color": "orange", "value": 0.04 },
+            { "color": "red",    "value": 0.08 }
+          ]}
+        },
         "overrides": []
       },
-      "gridPos": { "h": 6, "w": 18, "x": 6, "y": 41 },
+      "gridPos": { "h": 6, "w": 18, "x": 6, "y": 52 },
       "id": 11,
-      "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "rate(chunk_checksum_failures_total[5m])",
-          "legendFormat": "{{stream_type}} checksum failures/s",
-          "refId": "A"
-        }
-      ],
-      "title": "Checksum Failure Rate",
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "rate(chunk_checksum_failures_total[5m])",
+        "legendFormat": "{{stream_type}} checksum failures/s",
+        "refId": "A"
+      }],
+      "title": "Checksum Failure Rate  [orange=0.04/s  red=0.08/s]",
       "type": "timeseries"
     },
 
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 47 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 59 },
       "id": 105,
       "title": "MongoDB",
       "type": "row"
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "MongoDB write operations per second. Inserts come from FastAPI (new VOD/live docs). Updates come from Spark (status transitions and chunk upserts).",
       "fieldConfig": {
         "defaults": { "unit": "short", "color": { "mode": "palette-classic" } },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 60 },
       "id": 12,
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -327,115 +557,125 @@
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Current open connections to MongoDB. Expect 2–4: one from FastAPI, one from Spark.",
       "fieldConfig": {
         "defaults": { "unit": "short", "color": { "mode": "palette-classic" } },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 48 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 60 },
       "id": 13,
-      "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "mongodb_connections{state=\"current\"}",
-          "legendFormat": "Current connections",
-          "refId": "A"
-        }
-      ],
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "mongodb_connections{state=\"current\"}",
+        "legendFormat": "Current connections",
+        "refId": "A"
+      }],
       "title": "MongoDB: Current Connections",
       "type": "timeseries"
     },
 
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 56 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 69 },
       "id": 106,
       "title": "FastAPI",
       "type": "row"
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "HTTP requests per second to FastAPI, grouped by endpoint and status code. VOD uploads ~0.05/s. Streams/start and /end appear as occasional spikes.",
       "fieldConfig": {
         "defaults": { "unit": "reqps", "color": { "mode": "palette-classic" } },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 57 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 70 },
       "id": 14,
-      "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "rate(api_requests_total[1m])",
-          "legendFormat": "{{endpoint}} ({{status}})",
-          "refId": "A"
-        }
-      ],
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "rate(api_requests_total[1m])",
+        "legendFormat": "{{endpoint}} ({{status}})",
+        "refId": "A"
+      }],
       "title": "FastAPI: Request Rate",
       "type": "timeseries"
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "95th-percentile API response time by endpoint. Upload calls MinIO + MongoDB + Kafka so expect 50–200ms. Manifest calls (presigned URL gen) should be <100ms.",
       "fieldConfig": {
-        "defaults": { "unit": "s", "color": { "mode": "palette-classic" } },
+        "defaults": {
+          "unit": "s",
+          "color": { "mode": "palette-classic" },
+          "custom": { "thresholdsStyle": { "mode": "line" } },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "transparent", "value": null },
+            { "color": "orange", "value": 0.5 },
+            { "color": "red",    "value": 2.0 }
+          ]}
+        },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 57 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 70 },
       "id": 15,
-      "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, rate(api_request_duration_seconds_bucket[1m]))",
-          "legendFormat": "p95 response time — {{endpoint}}",
-          "refId": "A"
-        }
-      ],
-      "title": "FastAPI: p95 Response Time",
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "histogram_quantile(0.95, rate(api_request_duration_seconds_bucket[1m]))",
+        "legendFormat": "p95 — {{endpoint}}",
+        "refId": "A"
+      }],
+      "title": "FastAPI: p95 Response Time  [orange=0.5s  red=2s]",
       "type": "timeseries"
     },
 
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 65 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 79 },
       "id": 107,
       "title": "MinIO Object Storage",
       "type": "row"
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Total bytes stored per bucket over time. manifests bucket stays small (text only). vod-variants grows as VOD episodes are processed. live-streams grows continuously.",
       "fieldConfig": {
         "defaults": { "unit": "bytes", "color": { "mode": "palette-classic" } },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 66 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 80 },
       "id": 16,
-      "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "minio_bucket_usage_total_bytes",
-          "legendFormat": "{{bucket}} bytes",
-          "refId": "A"
-        }
-      ],
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "minio_bucket_usage_total_bytes",
+        "legendFormat": "{{bucket}}",
+        "refId": "A"
+      }],
       "title": "MinIO: Storage Used per Bucket",
       "type": "timeseries"
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Object count per bucket. live-streams grows fastest (~1/s). manifests grows slowly (one .m3u8 per stream). vod-variants grows at 4× the VOD chunk rate.",
       "fieldConfig": {
         "defaults": { "unit": "short", "color": { "mode": "palette-classic" } },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 66 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 80 },
       "id": 17,
-      "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "minio_bucket_objects_count",
-          "legendFormat": "{{bucket}} objects",
-          "refId": "A"
-        }
-      ],
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "minio_bucket_objects_count",
+        "legendFormat": "{{bucket}} objects",
+        "refId": "A"
+      }],
       "title": "MinIO: Object Count per Bucket",
       "type": "timeseries"
     }
+
   ],
 
   "refresh": "10s",
@@ -448,5 +688,5 @@
   "timezone": "browser",
   "title": "Kafka-Spark Streaming Pipeline",
   "uid": "streaming-pipeline",
-  "version": 1
+  "version": 2
 }
