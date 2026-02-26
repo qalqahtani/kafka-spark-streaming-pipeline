@@ -10,6 +10,7 @@ apiVersion: 1
 
 datasources:
   - name: Prometheus
+    uid: "prometheus"          # pinned UID — must match uid in dashboard JSON panels
     type: prometheus
     access: proxy
     # Grafana reaches Prometheus via Docker's internal network
