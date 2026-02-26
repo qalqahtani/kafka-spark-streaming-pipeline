@@ -24,6 +24,7 @@ This project was built as a portfolio piece covering two fundamentally different
 14. [Configuration Reference](#14-configuration-reference)
 15. [Project Structure](#15-project-structure)
 16. [Production Considerations](#16-production-considerations)
+17. [Read Path & CDN Integration](#17-read-path--cdn-integration)
 
 ---
 
@@ -918,3 +919,164 @@ This simulation intentionally omits several production concerns:
 | No CDN | CloudFront / Akamai serving `.ts` segments with edge caching; CDN key rotation for DRM |
 | No cold storage tiering | S3 Lifecycle Rules: Standard → Standard-IA (30 days) → Glacier (90 days) → Glacier Deep Archive (1 year) |
 | Grafana dashboard manually provisioned | Automated alert rules; PagerDuty integration; SLO dashboards with burn rate alerts |
+
+---
+
+## 17. Read Path & CDN Integration
+
+### How Processed Content Reaches a Viewer
+
+After Spark finishes processing, the pipeline has written two categories of artifacts to MinIO:
+- **HLS manifests** (`.m3u8` text files) in the `manifests/` bucket
+- **Video segments** (`.ts` binary files) in `vod-variants/`, `vod-raw/`, or `live-streams/`
+
+Getting those bytes to a viewer's device involves two problems:
+1. **Discovery** — how does the player know which manifest URL to request?
+2. **Delivery** — how do the bytes travel from storage to the viewer's screen efficiently?
+
+---
+
+### Current Simulation: Presigned MinIO URLs
+
+In this simulation, FastAPI answers both questions via a single presigned URL:
+
+```
+GET /vod/{stream_id}/manifest
+  → FastAPI looks up stream_id in MongoDB (vod_metadata)
+  → Reads manifest_path: "manifests/vod-3e87dd00aab5/vod_manifest.m3u8"
+  → Calls MinIO to generate a presigned URL (1-hour TTL)
+  → Returns the URL to the caller
+
+Viewer pastes URL into VLC or HLS.js → player fetches the manifest → player fetches .ts segments
+```
+
+This works locally because MinIO acts as both the origin store and the delivery server. It does not scale — MinIO is not a CDN.
+
+---
+
+### Production: CDN Sits in Front of Object Storage
+
+In production, a CDN (CloudFront, Akamai, Fastly) is placed in front of S3 or MinIO as the **origin**. The CDN caches objects at edge nodes close to viewers. The URL structure becomes deterministic:
+
+```
+https://cdn.example.com/{bucket}/{key}
+```
+
+Because the MinIO/S3 key structure in this pipeline is already deterministic — built entirely from `stream_id` and `chunk_index` — the CDN URL for any piece of content can be computed without a database lookup:
+
+```
+# VOD manifest
+https://cdn.example.com/manifests/{stream_id}/vod_manifest.m3u8
+
+# VOD variant segment (chunk 0, 1080p)
+https://cdn.example.com/vod-variants/{stream_id}/1080p/0.ts
+
+# Live manifest (rolling window, polled every ~2s by the player)
+https://cdn.example.com/manifests/{stream_id}/live_manifest.m3u8
+
+# Live segment
+https://cdn.example.com/live-streams/{stream_id}/chunks/{n}.ts
+```
+
+The platform only needs the `stream_id` to construct any URL. No manifest URL is stored explicitly in MongoDB — `manifest_path` in MongoDB is a storage key, not a CDN URL.
+
+---
+
+### `stream_id` — The Universal Content Key
+
+`stream_id` is the single identifier that ties together every system in the stack:
+
+| System | How `stream_id` is used |
+|---|---|
+| **Kafka** | `stream_id` field in every JSON message on `vod-chunks` and `live-chunks` |
+| **MongoDB** | Primary lookup key in `vod_metadata` and `live_metadata` |
+| **MinIO** | Root prefix for all objects belonging to this stream (`{bucket}/{stream_id}/...`) |
+| **CDN** | Embedded in the URL path — every CDN edge node can serve by key |
+| **Player** | Requested in every manifest and segment fetch (`/manifests/{stream_id}/...`) |
+| **DRM** | Content key identifier used when requesting a licence (`content_id = stream_id`) |
+
+A platform that integrates with this pipeline needs to store exactly one thing per piece of content: the `stream_id`. Everything else (manifest URL, segment URLs, metadata) is derivable from it.
+
+---
+
+### CDN Caching Strategy: VOD vs Live
+
+VOD and live content have opposite caching requirements:
+
+| Object | Cache-Control | Reason |
+|---|---|---|
+| `vod_manifest.m3u8` | `max-age=31536000, immutable` | VOD manifest never changes once `status=ready` |
+| VOD `.ts` segments | `max-age=31536000, immutable` | Segments are write-once; content never changes |
+| `live_manifest.m3u8` | `max-age=2, s-maxage=1` | Rolling window updates every ~1s; CDN must revalidate frequently |
+| Live `.ts` segments | `max-age=31536000, immutable` | Once written, a segment's bytes never change |
+
+The live manifest is the only object that must be fetched fresh. Everything else — including live `.ts` segments — can be cached indefinitely at the CDN edge. This is why live streaming CDN costs are dominated by manifest requests, not segment bandwidth: manifest objects are small (~500 bytes) but fetched every 2 seconds per viewer.
+
+When the stream ends and `#EXT-X-ENDLIST` is appended, the platform updates the manifest's Cache-Control to `immutable`. From that moment, the stream is served as pure VOD.
+
+---
+
+### MongoDB as Content Catalog
+
+MongoDB (`vod_metadata` and `live_metadata`) is the authoritative **content catalog** — the source of truth for content identity and state. A platform API would expose it like this:
+
+```
+GET /content/{stream_id}
+```
+
+Example response for a finished VOD episode:
+
+```json
+{
+  "stream_id": "vod-3e87dd00aab5",
+  "title": "VOD: The Farmer",
+  "status": "ready",
+  "stream_type": "vod",
+  "duration_ms": 127000,
+  "variants": ["1080p", "720p", "480p", "360p"],
+  "manifest_url": "https://cdn.example.com/manifests/vod-3e87dd00aab5/vod_manifest.m3u8",
+  "processing_latency_ms": 8089,
+  "created_at": "2026-02-24T12:16:35Z",
+  "ready_at": "2026-02-24T12:16:44Z"
+}
+```
+
+Example response for an active live stream:
+
+```json
+{
+  "stream_id": "live-54390fa408",
+  "status": "live",
+  "stream_type": "live",
+  "manifest_url": "https://cdn.example.com/manifests/live-54390fa408/live_manifest.m3u8",
+  "dvr_window_start": 990,
+  "latest_chunk": 999,
+  "started_at": "2026-02-24T11:00:00Z"
+}
+```
+
+The platform constructs `manifest_url` at response time by combining the CDN base URL with the known key pattern. It does not need to store the full URL — only the `stream_id` and the CDN base URL (configuration).
+
+---
+
+### DRM and Signed CDN URLs
+
+In a DRM-protected deployment, the flow is extended:
+
+```
+1. Player requests manifest URL from platform API (authenticated)
+2. Platform API:
+   a. Verifies the user is entitled to this content
+   b. Issues a short-lived signed CDN URL (e.g., CloudFront signed URL, 15-minute TTL)
+   c. Returns the signed manifest URL to the player
+3. Player fetches manifest from CDN using the signed URL
+4. Player encounters an encrypted segment (AES-128 or CENC)
+5. Player requests a licence from the DRM licence server (Widevine / FairPlay / PlayReady)
+   — using content_id = stream_id
+6. DRM server verifies the user's entitlement, issues a decryption key
+7. Player decrypts and plays segments
+```
+
+The signed CDN URL serves the same conceptual role as the presigned MinIO URL in this simulation — both are time-limited tokens granting access to a specific object path. The difference is scale: a CDN signed URL is valid for millions of edge-cached fetches; a MinIO presigned URL hits a single origin every time.
+
+`stream_id` remains the content key at every step: the platform entitlement check, the CDN URL path, the DRM licence server lookup, and the player's HLS request.
